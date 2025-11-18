@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Wiz Exercise Webapp</title>
+    <link rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+</head>
+<body class="p-4">
+
+<h1>Wiz Exercise - MongoDB Webapp</h1>
+
+<hr>
+
+<h3>Add data</h3>
+<div class="input-group mb-3">
+  <input type="text" id="inputText" class="form-control" placeholder="Add entry to MongoDB database">
+  <button class="btn btn-primary" onclick="addItem()">Add</button>
+</div>
+
+<h3>Read data</h3>
+<button class="btn btn-secondary mb-3" onclick="loadItems()">Read</button>
+
+<ul id="list" class="list-group mb-5"></ul>
+
+<h3>Download file</h3>
+<a href="/download/wiz-exercise" class="btn btn-success">Download wiz-exercise.txt</a>
+
+<h3>Pod Info</h3>
+<p>Pod name: <span id="podName">loading...</span></p>
+
+<script>
+async function addItem() {
+  const text = document.getElementById("inputText").value;
+
+  await fetch("/api/add", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text })
+  });
+
+  document.getElementById("inputText").value = "";
+  loadItems();
+}
+
+async function loadItems() {
+  const res = await fetch("/api/list");
+  const items = await res.json();
+
+  const list = document.getElementById("list");
+  list.innerHTML = "";
+
+  items.forEach(i => {
+    const li = document.createElement("li");
+    li.className = "list-group-item";
+    li.innerText = i.text + " (ajouté: " + new Date(i.addedAt).toLocaleString() + ")";
+    list.appendChild(li);
+  });
+}
+
+async function showPodName() {
+  const res = await fetch("/api/podname");
+  const data = await res.json();
+  document.getElementById("podName").innerText = data.podName;
+}
+
+loadItems();
+showPodName();
+</script>
+
+</body>
+</html>
