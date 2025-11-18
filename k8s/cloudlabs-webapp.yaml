@@ -42,7 +42,7 @@ spec:
       serviceAccountName: secret-sa   
       containers:
       - name: webapp
-        image: chrisley75/cloudlabs-webapp:1.0.0
+        image: chrisley75/cloudlabs-webapp:1.0.1
         ports:
         - containerPort: 3000
         env:
