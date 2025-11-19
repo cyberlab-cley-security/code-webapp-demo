@@ -46,9 +46,14 @@ jobs:
 
       # Login to Amazon ECR
       - name: Login to Amazon ECR
-        id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
-      
+
+      # Ensure the ECR repository exists
+      - name: Ensure ECR repository exists
+        run: |
+          aws ecr describe-repositories --repository-names ${{ github.event.inputs.image_name }} --region ${{ github.event.inputs.aws_region }} || \
+          aws ecr create-repository --repository-name ${{ github.event.inputs.image_name }} --region ${{ github.event.inputs.aws_region }}
+
       # Enable Buildx
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -61,7 +66,7 @@ jobs:
           load: true
           tags: ${{ github.event.inputs.image_name }}:scan
           cache-from: type=registry,ref=${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:buildcache
-      
+
       # Install Docker Scout manually
       - name: Install Docker Scout
         run: |
@@ -69,12 +74,12 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/docker/scout-cli/main/install.sh | sh
           docker scout version
 
-      # Login Docker Hub for Scout
+      # Docker Hub login for Scout
       - name: Docker login for Scout
         run: |
           echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
 
-      # Scan with Docker Scout (output TXT only)
+      # Scan with Docker Scout (TXT output only)
       - name: Scan image with Docker Scout
         run: |
           IMAGE=${{ github.event.inputs.image_name }}:scan
@@ -113,7 +118,7 @@ jobs:
           cache-from: type=registry,ref=${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:buildcache
           cache-to: type=registry,ref=${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:buildcache,mode=max
 
-      # Output full image paths + export as outputs
+      # Output full image paths
       - name: Image pushed successfully
         id: image-info
         run: |
