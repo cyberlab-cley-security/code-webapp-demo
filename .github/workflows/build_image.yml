@@ -26,13 +26,17 @@ on:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+
+    outputs:
+      image_latest: ${{ steps.image-info.outputs.FULL_IMAGE_LATEST }}
+      image_build: ${{ steps.image-info.outputs.FULL_IMAGE_BUILD }}
     
     steps:
       # Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v4
       
-      # Configure AWS credentials using GitHub secrets
+      # Configure AWS credentials
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -45,12 +49,12 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
       
-      # Set up Docker Buildx
+      # Enable Buildx
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      
-      # Build Docker image locally
-      - name: Build Docker image
+
+      # Build local image (for scanning)
+      - name: Build Docker image locally for scanning
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -58,19 +62,24 @@ jobs:
           tags: ${{ github.event.inputs.image_name }}:scan
           cache-from: type=registry,ref=${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:buildcache
       
-      # Install Docker Scout CLI
+      # Install Docker Scout manually
       - name: Install Docker Scout
         run: |
-          docker scout version || docker scout update
-      
-      # Run Docker Scout scan
+          echo "Installing Docker Scout CLI..."
+          curl -fsSL https://raw.githubusercontent.com/docker/scout-cli/main/install.sh | sh
+          docker scout version
+
+      # Scan with Docker Scout
       - name: Scan image with Docker Scout
         run: |
-          echo "Scanning image ${{ github.event.inputs.image_name }}:scan with Docker Scout..."
+          echo "Scanning image with Docker Scout..."
           docker scout cves ${{ github.event.inputs.image_name }}:scan --json > scout-results.json
-          cat scout-results.json
-      
-      # Optionally upload scan results to GitHub (SARIF not yet supported nativement)
+
+          echo "====== Docker Scout Summary ======"
+          docker scout cves ${{ github.event.inputs.image_name }}:scan || true
+          echo "=================================="
+
+      # Upload Docker Scout report
       - name: Upload Docker Scout results
         if: always()
         uses: actions/upload-artifact@v4
@@ -78,7 +87,7 @@ jobs:
           name: docker-scout-results
           path: scout-results.json
       
-      # Build and push Docker image to ECR
+      # Build and push image to ECR
       - name: Build and push Docker image to ECR
         uses: docker/build-push-action@v5
         with:
@@ -89,11 +98,20 @@ jobs:
             ${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:${{ github.run_number }}
           cache-from: type=registry,ref=${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:buildcache
           cache-to: type=registry,ref=${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:buildcache,mode=max
-      
-      # Display success message
+
+      # Output full image paths + export as outputs
       - name: Image pushed successfully
+        id: image-info
         run: |
-          echo "✅ Image successfully built and pushed to ECR"
-          echo "Registry: ${{ github.event.inputs.ecr_registry }}"
-          echo "Image: ${{ github.event.inputs.image_name }}"
-          echo "Tags: ${{ github.event.inputs.image_tag }}, ${{ github.run_number }}"
+          FULL_IMAGE_LATEST="${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:${{ github.event.inputs.image_tag }}"
+          FULL_IMAGE_BUILD="${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:${{ github.run_number }}"
+
+          echo "FULL_IMAGE_LATEST=$FULL_IMAGE_LATEST" >> $GITHUB_OUTPUT
+          echo "FULL_IMAGE_BUILD=$FULL_IMAGE_BUILD" >> $GITHUB_OUTPUT
+
+          echo "✔️ Docker image successfully built and pushed to ECR"
+          echo ""
+          echo "===== Full Image Paths ====="
+          echo "Latest tag:   $FULL_IMAGE_LATEST"
+          echo "Build tag:    $FULL_IMAGE_BUILD"
+          echo "================================"
