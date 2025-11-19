@@ -51,8 +51,12 @@ jobs:
       # Ensure the ECR repository exists
       - name: Ensure ECR repository exists
         run: |
-          aws ecr describe-repositories --repository-names ${{ github.event.inputs.image_name }} --region ${{ github.event.inputs.aws_region }} || \
-          aws ecr create-repository --repository-name ${{ github.event.inputs.image_name }} --region ${{ github.event.inputs.aws_region }}
+          if ! aws ecr describe-repositories --repository-names ${{ github.event.inputs.image_name }} --region ${{ github.event.inputs.aws_region }} >/dev/null 2>&1; then
+            echo "Repository does not exist. Creating..."
+            aws ecr create-repository --repository-name ${{ github.event.inputs.image_name }} --region ${{ github.event.inputs.aws_region }}
+          else
+            echo "Repository already exists."
+          fi
 
       # Enable Buildx
       - name: Set up Docker Buildx
@@ -65,7 +69,6 @@ jobs:
           context: .
           load: true
           tags: ${{ github.event.inputs.image_name }}:scan
-          cache-from: type=registry,ref=${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:buildcache
 
       # Install Docker Scout manually
       - name: Install Docker Scout
@@ -115,10 +118,10 @@ jobs:
           tags: |
             ${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:${{ github.event.inputs.image_tag }}
             ${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:${{ github.run_number }}
-          cache-from: type=registry,ref=${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:buildcache
+          cache-from: type=registry,ref=${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:buildcache || true
           cache-to: type=registry,ref=${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:buildcache,mode=max
 
-      # Output full image paths
+      # Output full image paths + export as outputs
       - name: Image pushed successfully
         id: image-info
         run: |
