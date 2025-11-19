@@ -72,12 +72,20 @@ jobs:
       # Scan with Docker Scout
       - name: Scan image with Docker Scout
         run: |
-          echo "Scanning image with Docker Scout..."
-          docker scout cves ${{ github.event.inputs.image_name }}:scan --json > scout-results.json
+          IMAGE=${{ github.event.inputs.image_name }}:scan
+          echo "Scanning image $IMAGE with Docker Scout..."
+          docker scout cves $IMAGE --json > scout-results.json || true
 
           echo "====== Docker Scout Summary ======"
-          docker scout cves ${{ github.event.inputs.image_name }}:scan || true
+          docker scout cves $IMAGE || true
           echo "=================================="
+
+          CRITICAL_COUNT=$(jq '[.vulnerabilities[] | select(.severity=="CRITICAL" or .severity=="HIGH")] | length' scout-results.json)
+          if [ "$CRITICAL_COUNT" -gt 0 ]; then
+            echo "⚠️ ALERT: $CRITICAL_COUNT critical/high vulnerabilities found!"
+          else
+            echo "✅ No critical/high vulnerabilities found."
+          fi
 
       # Upload Docker Scout report
       - name: Upload Docker Scout results
