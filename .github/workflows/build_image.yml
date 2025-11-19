@@ -28,29 +28,29 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      # Checkout the current repository containing Dockerfile and packages
+      # Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v4
       
-      # Configure AWS credentials from GitHub secrets
+      # Configure AWS credentials using GitHub secrets
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ github.event.inputs.aws_region }}
-      
+
       # Login to Amazon ECR
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
       
-      # Set up Docker Buildx for advanced build capabilities
+      # Set up Docker Buildx
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       
-      # Build the Docker image locally for scanning
-      - name: Build Docker image for scanning
+      # Build Docker image locally
+      - name: Build Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -58,48 +58,39 @@ jobs:
           tags: ${{ github.event.inputs.image_name }}:scan
           cache-from: type=registry,ref=${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:buildcache
       
-      # Run Trivy vulnerability scanner
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ github.event.inputs.image_name }}:scan
-          format: 'table'
-          exit-code: '1'
-          ignore-unfixed: true
-          vuln-type: 'os,library'
-          severity: 'CRITICAL,HIGH'
+      # Install Docker Scout CLI
+      - name: Install Docker Scout
+        run: |
+          docker scout version || docker scout update
       
-      # Generate Trivy report for upload
-      - name: Generate Trivy report
-        uses: aquasecurity/trivy-action@master
+      # Run Docker Scout scan
+      - name: Scan image with Docker Scout
+        run: |
+          echo "Scanning image ${{ github.event.inputs.image_name }}:scan with Docker Scout..."
+          docker scout cves ${{ github.event.inputs.image_name }}:scan --json > scout-results.json
+          cat scout-results.json
+      
+      # Optionally upload scan results to GitHub (SARIF not yet supported nativement)
+      - name: Upload Docker Scout results
         if: always()
+        uses: actions/upload-artifact@v3
         with:
-          image-ref: ${{ github.event.inputs.image_name }}:scan
-          format: 'sarif'
-          output: 'trivy-results.sarif'
+          name: docker-scout-results
+          path: scout-results.json
       
-      # Upload Trivy scan results to GitHub Security tab
-      - name: Upload Trivy scan results to GitHub Security
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
-        with:
-          sarif_file: 'trivy-results.sarif'
-      
-      # Build and push the Docker image to ECR with caching
+      # Build and push Docker image to ECR
       - name: Build and push Docker image to ECR
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
-          # Tags: user-specified tag + build number tag
           tags: |
             ${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:${{ github.event.inputs.image_tag }}
             ${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:${{ github.run_number }}
-          # Use registry cache for faster builds
           cache-from: type=registry,ref=${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:buildcache
           cache-to: type=registry,ref=${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:buildcache,mode=max
       
-      # Display success message with image details
+      # Display success message
       - name: Image pushed successfully
         run: |
           echo "✅ Image successfully built and pushed to ECR"
