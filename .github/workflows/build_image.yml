@@ -74,27 +74,23 @@ jobs:
         run: |
           echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
 
-      # Scan with Docker Scout
+      # Scan with Docker Scout (output TXT only)
       - name: Scan image with Docker Scout
         run: |
           IMAGE=${{ github.event.inputs.image_name }}:scan
           echo "Scanning image $IMAGE with Docker Scout..."
-          docker scout cves $IMAGE --json > scout-results.json 2> scout-errors.log || true
+          docker scout cves $IMAGE > scout-results.txt 2>&1 || true
 
           echo "====== Docker Scout Summary ======"
-          docker scout cves $IMAGE || true
+          cat scout-results.txt
           echo "=================================="
 
-          # Alert if critical/high CVEs found, do not block
-          if [ -s scout-results.json ]; then
-            CRITICAL_COUNT=$(jq '[.vulnerabilities[] | select(.severity=="CRITICAL" or .severity=="HIGH")] | length' scout-results.json)
-            if [ "$CRITICAL_COUNT" -gt 0 ]; then
-              echo "⚠️ ALERT: $CRITICAL_COUNT critical/high vulnerabilities found!"
-            else
-              echo "✅ No critical/high vulnerabilities found."
-            fi
+          # Alert if HIGH/CRITICAL CVEs found, do not block
+          HIGH_CRITICAL=$(grep -E "HIGH|CRITICAL" scout-results.txt | wc -l)
+          if [ "$HIGH_CRITICAL" -gt 0 ]; then
+            echo "⚠️ ALERT: $HIGH_CRITICAL HIGH/CRITICAL vulnerabilities detected!"
           else
-            echo "⚠️ ALERT: Docker Scout scan did not produce valid JSON results."
+            echo "✅ No HIGH/CRITICAL vulnerabilities detected."
           fi
 
       # Upload Docker Scout report
@@ -103,7 +99,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: docker-scout-results
-          path: scout-results.json
+          path: scout-results.txt
       
       # Build and push image to ECR
       - name: Build and push Docker image to ECR
