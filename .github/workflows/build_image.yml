@@ -1,0 +1,108 @@
+name: Docker Build and Push to ECR
+
+on:
+  workflow_dispatch:
+    inputs:
+      ecr_registry:
+        description: 'AWS ECR registry URL (e.g., 123456789.dkr.ecr.us-east-1.amazonaws.com)'
+        required: true
+        type: string
+      image_name:
+        description: 'Docker image name'
+        required: true
+        type: string
+        default: 'cloudlabs-webapp'
+      image_tag:
+        description: 'Docker image tag'
+        required: true
+        type: string
+        default: 'latest'
+      aws_region:
+        description: 'AWS region'
+        required: true
+        type: string
+        default: 'us-east-1'
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    
+    steps:
+      # Checkout the current repository containing Dockerfile and packages
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      # Configure AWS credentials from GitHub secrets
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ github.event.inputs.aws_region }}
+      
+      # Login to Amazon ECR
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      
+      # Set up Docker Buildx for advanced build capabilities
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      # Build the Docker image locally for scanning
+      - name: Build Docker image for scanning
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: ${{ github.event.inputs.image_name }}:scan
+          cache-from: type=registry,ref=${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:buildcache
+      
+      # Run Trivy vulnerability scanner
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ github.event.inputs.image_name }}:scan
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+      
+      # Generate Trivy report for upload
+      - name: Generate Trivy report
+        uses: aquasecurity/trivy-action@master
+        if: always()
+        with:
+          image-ref: ${{ github.event.inputs.image_name }}:scan
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+      
+      # Upload Trivy scan results to GitHub Security tab
+      - name: Upload Trivy scan results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+      
+      # Build and push the Docker image to ECR with caching
+      - name: Build and push Docker image to ECR
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          # Tags: user-specified tag + build number tag
+          tags: |
+            ${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:${{ github.event.inputs.image_tag }}
+            ${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:${{ github.run_number }}
+          # Use registry cache for faster builds
+          cache-from: type=registry,ref=${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:buildcache
+          cache-to: type=registry,ref=${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:buildcache,mode=max
+      
+      # Display success message with image details
+      - name: Image pushed successfully
+        run: |
+          echo "✅ Image successfully built and pushed to ECR"
+          echo "Registry: ${{ github.event.inputs.ecr_registry }}"
+          echo "Image: ${{ github.event.inputs.image_name }}"
+          echo "Tags: ${{ github.event.inputs.image_tag }}, ${{ github.run_number }}"
