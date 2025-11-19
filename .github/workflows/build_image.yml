@@ -73,7 +73,7 @@ jobs:
       # Optionally upload scan results to GitHub (SARIF not yet supported nativement)
       - name: Upload Docker Scout results
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: docker-scout-results
           path: scout-results.json
