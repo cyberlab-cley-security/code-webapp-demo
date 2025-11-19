@@ -1,19 +1,20 @@
-name: Docker Build and Push to ECR
+name: Docker Build and Push to ECR - Separate Inputs
 
 on:
   workflow_dispatch:
     inputs:
       ecr_registry:
-        description: 'AWS ECR registry URL (e.g., 123456789.dkr.ecr.us-east-1.amazonaws.com)'
+        description: 'AWS ECR Registry Host (e.g., 123456789.dkr.ecr.us-east-1.amazonaws.com)'
         required: true
         type: string
-      image_name:
-        description: 'Docker image name'
+        default: '<CHANGE ME>' 
+      ecr_repository: 
+        description: 'AWS ECR Repository Name (e.g., qq-chrisley75-ecr-xhd)'
         required: true
         type: string
-        default: 'cloudlabs-webapp'
+        default: '<CHANGE ME>' 
       image_tag:
-        description: 'Docker image tag'
+        description: 'Docker image tag (e.g., latest, v1.0.0)'
         required: true
         type: string
         default: 'latest'
@@ -27,6 +28,7 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
 
+    # Les outputs sont définis à la fin via l'étape 'image-info'
     outputs:
       image_latest: ${{ steps.image-info.outputs.FULL_IMAGE_LATEST }}
       image_build: ${{ steps.image-info.outputs.FULL_IMAGE_BUILD }}
@@ -47,53 +49,55 @@ jobs:
       # Login to Amazon ECR
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registry: ${{ github.event.inputs.ecr_registry }}
 
       # Ensure the ECR repository exists
       - name: Ensure ECR repository exists
         run: |
-          if ! aws ecr describe-repositories --repository-names ${{ github.event.inputs.image_name }} --region ${{ github.event.inputs.aws_region }} >/dev/null 2>&1; then
+          REPO_NAME=${{ github.event.inputs.ecr_repository }}
+          AWS_REGION=${{ github.event.inputs.aws_region }}
+
+          if ! aws ecr describe-repositories --repository-names $REPO_NAME --region $AWS_REGION >/dev/null 2>&1; then
             echo "Repository does not exist. Creating..."
-            aws ecr create-repository --repository-name ${{ github.event.inputs.image_name }} --region ${{ github.event.inputs.aws_region }}
+            aws ecr create-repository --repository-name $REPO_NAME --region $AWS_REGION
           else
             echo "Repository already exists."
           fi
 
-      # Enable Buildx
+      # Build local image (for scanning)
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Build local image (for scanning)
       - name: Build Docker image locally for scanning
         uses: docker/build-push-action@v5
         with:
           context: .
           load: true
-          tags: ${{ github.event.inputs.image_name }}:scan
+          tags: ${{ github.event.inputs.ecr_repository }}:scan
 
-      # Install Docker Scout manually
+      # Install Docker Scout 
       - name: Install Docker Scout
         run: |
           echo "Installing Docker Scout CLI..."
           curl -fsSL https://raw.githubusercontent.com/docker/scout-cli/main/install.sh | sh
           docker scout version
 
-      # Docker Hub login for Scout
       - name: Docker login for Scout
         run: |
           echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
 
-      # Scan with Docker Scout (TXT output only)
+      # Scan with Docker Scout 
       - name: Scan image with Docker Scout
         run: |
-          IMAGE=${{ github.event.inputs.image_name }}:scan
+          IMAGE=${{ github.event.inputs.ecr_repository }}:scan
           echo "Scanning image $IMAGE with Docker Scout..."
           docker scout cves $IMAGE > scout-results.txt 2>&1 || true
-
+          # ... (rest of the scan logic) ...
           echo "====== Docker Scout Summary ======"
           cat scout-results.txt
           echo "=================================="
 
-          # Alert if HIGH/CRITICAL CVEs found, do not block
           HIGH_CRITICAL=$(grep -E "HIGH|CRITICAL" scout-results.txt | wc -l)
           if [ "$HIGH_CRITICAL" -gt 0 ]; then
             echo "⚠️ ALERT: $HIGH_CRITICAL HIGH/CRITICAL vulnerabilities detected!"
@@ -101,7 +105,6 @@ jobs:
             echo "✅ No HIGH/CRITICAL vulnerabilities detected."
           fi
 
-      # Upload Docker Scout report
       - name: Upload Docker Scout results
         if: always()
         uses: actions/upload-artifact@v4
@@ -116,17 +119,20 @@ jobs:
           context: .
           push: true
           tags: |
-            ${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:${{ github.event.inputs.image_tag }}
-            ${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:${{ github.run_number }}
-          cache-from: type=registry,ref=${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:buildcache || true
-          cache-to: type=registry,ref=${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:buildcache,mode=max
+            # Concaténation des deux inputs pour former le chemin complet
+            ${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.ecr_repository }}:${{ github.event.inputs.image_tag }}
+            ${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.ecr_repository }}:${{ github.run_number }}
+          # Utilise la concaténation pour le cache (avec la syntaxe corrigée)
+          cache-from: type=registry,ref=${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.ecr_repository }}:buildcache
+          cache-to: type=registry,ref=${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.ecr_repository }}:buildcache,mode=max
 
       # Output full image paths + export as outputs
       - name: Image pushed successfully
         id: image-info
         run: |
-          FULL_IMAGE_LATEST="${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:${{ github.event.inputs.image_tag }}"
-          FULL_IMAGE_BUILD="${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.image_name }}:${{ github.run_number }}"
+          # Construction des chemins complets
+          FULL_IMAGE_LATEST="${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.ecr_repository }}:${{ github.event.inputs.image_tag }}"
+          FULL_IMAGE_BUILD="${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.ecr_repository }}:${{ github.run_number }}"
 
           echo "FULL_IMAGE_LATEST=$FULL_IMAGE_LATEST" >> $GITHUB_OUTPUT
           echo "FULL_IMAGE_BUILD=$FULL_IMAGE_BUILD" >> $GITHUB_OUTPUT
