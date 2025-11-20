@@ -1,15 +1,10 @@
-name: Docker Build and Push to ECR - Separate Inputs
+name: Docker Build and Push to ECR - Single Input
 
 on:
   workflow_dispatch:
     inputs:
-      ecr_registry:
-        description: 'AWS ECR Registry Host (e.g., 123456789.dkr.ecr.us-east-1.amazonaws.com)'
-        required: true
-        type: string
-        default: '<CHANGE ME>' 
-      ecr_repository: 
-        description: 'AWS ECR Repository Name (e.g., qq-chrisley75-ecr-xhd)'
+      ecr_repository_uri:
+        description: 'AWS ECR Repository URI (e.g., 123456789.dkr.ecr.us-east-1.amazonaws.com/lab)'
         required: true
         type: string
         default: '<CHANGE ME>' 
@@ -37,6 +32,23 @@ jobs:
       # Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      # Parse ECR URI to extract registry and repository name
+      - name: Parse ECR URI
+        id: parse_ecr
+        run: |
+          ECR_URI="${{ github.event.inputs.ecr_repository_uri }}"
+          
+          # Extract registry (host) and repository name
+          ECR_REGISTRY=$(echo $ECR_URI | cut -d'/' -f1)
+          ECR_REPOSITORY=$(echo $ECR_URI | cut -d'/' -f2-)
+          
+          echo "ECR_REGISTRY=$ECR_REGISTRY" >> $GITHUB_OUTPUT
+          echo "ECR_REPOSITORY=$ECR_REPOSITORY" >> $GITHUB_OUTPUT
+          
+          echo "Parsed ECR URI:"
+          echo "  Registry: $ECR_REGISTRY"
+          echo "  Repository: $ECR_REPOSITORY"
       
       # Configure AWS credentials
       - name: Configure AWS credentials
@@ -50,12 +62,12 @@ jobs:
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
         with:
-          registry: ${{ github.event.inputs.ecr_registry }}
+          registry: ${{ steps.parse_ecr.outputs.ECR_REGISTRY }}
 
       # Ensure the ECR repository exists
       - name: Ensure ECR repository exists
         run: |
-          REPO_NAME=${{ github.event.inputs.ecr_repository }}
+          REPO_NAME=${{ steps.parse_ecr.outputs.ECR_REPOSITORY }}
           AWS_REGION=${{ github.event.inputs.aws_region }}
 
           if ! aws ecr describe-repositories --repository-names $REPO_NAME --region $AWS_REGION >/dev/null 2>&1; then
@@ -74,7 +86,7 @@ jobs:
         with:
           context: .
           load: true
-          tags: ${{ github.event.inputs.ecr_repository }}:scan
+          tags: ${{ steps.parse_ecr.outputs.ECR_REPOSITORY }}:scan
 
       # Install Docker Scout 
       - name: Install Docker Scout
@@ -90,7 +102,7 @@ jobs:
       # Scan with Docker Scout 
       - name: Scan image with Docker Scout
         run: |
-          IMAGE=${{ github.event.inputs.ecr_repository }}:scan
+          IMAGE=${{ steps.parse_ecr.outputs.ECR_REPOSITORY }}:scan
           echo "Scanning image $IMAGE with Docker Scout..."
           docker scout cves $IMAGE > scout-results.txt 2>&1 || true
           # ... (rest of the scan logic) ...
@@ -120,19 +132,19 @@ jobs:
           push: true
           # Tags Docker, using two tags: the provided image_tag and the GitHub run number
           tags: | 
-            ${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.ecr_repository }}:${{ github.event.inputs.image_tag }}
-            ${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.ecr_repository }}:${{ github.run_number }}
+            ${{ github.event.inputs.ecr_repository_uri }}:${{ github.event.inputs.image_tag }}
+            ${{ github.event.inputs.ecr_repository_uri }}:${{ github.run_number }}
           # Utilise la concaténation pour le cache (avec la syntaxe corrigée)
-          cache-from: type=registry,ref=${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.ecr_repository }}:buildcache
-          cache-to: type=registry,ref=${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.ecr_repository }}:buildcache,mode=max
+          cache-from: type=registry,ref=${{ github.event.inputs.ecr_repository_uri }}:buildcache
+          cache-to: type=registry,ref=${{ github.event.inputs.ecr_repository_uri }}:buildcache,mode=max
 
       # Output full image paths + export as outputs
       - name: Image pushed successfully
         id: image-info
         run: |
           # Construction des chemins complets
-          FULL_IMAGE_LATEST="${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.ecr_repository }}:${{ github.event.inputs.image_tag }}"
-          FULL_IMAGE_BUILD="${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.ecr_repository }}:${{ github.run_number }}"
+          FULL_IMAGE_LATEST="${{ github.event.inputs.ecr_repository_uri }}:${{ github.event.inputs.image_tag }}"
+          FULL_IMAGE_BUILD="${{ github.event.inputs.ecr_repository_uri }}:${{ github.run_number }}"
 
           echo "FULL_IMAGE_LATEST=$FULL_IMAGE_LATEST" >> $GITHUB_OUTPUT
           echo "FULL_IMAGE_BUILD=$FULL_IMAGE_BUILD" >> $GITHUB_OUTPUT
