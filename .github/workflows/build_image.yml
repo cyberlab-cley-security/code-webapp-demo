@@ -143,3 +143,14 @@ jobs:
           echo "Latest tag:   $FULL_IMAGE_LATEST"
           echo "Build tag:    $FULL_IMAGE_BUILD"
           echo "================================"
+
+      # Trigger deployment workflow in another repo
+      - name: Trigger Deployment Workflow
+        uses: peter-evans/workflow-dispatch@v2
+        with:
+          # Nom de l'organisation et repo
+          repository: cyberlab-cley-security/deploy-webapp-demo
+          workflow: kustomize.yaml      
+          ref: main                     
+          inputs: |
+            IMAGE_URI=${{ steps.image-info.outputs.FULL_IMAGE_LATEST }}
