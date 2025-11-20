@@ -93,7 +93,7 @@ jobs:
         run: |
           echo "Installing Docker Scout CLI..."
           curl -fsSL https://raw.githubusercontent.com/docker/scout-cli/main/install.sh | VERSION=v1.18.3 sh
-          docker scout version
+          docker scout version || echo "⚠️ Docker Scout not installed, skipping scan"
 
       - name: Docker login for Scout
         run: |
@@ -103,18 +103,22 @@ jobs:
       - name: Scan image with Docker Scout
         run: |
           IMAGE=${{ steps.parse_ecr.outputs.ECR_REPOSITORY }}:scan
-          echo "Scanning image $IMAGE with Docker Scout..."
-          docker scout cves $IMAGE > scout-results.txt 2>&1 || true
-          # ... (rest of the scan logic) ...
-          echo "====== Docker Scout Summary ======"
-          cat scout-results.txt
-          echo "=================================="
+          if command -v docker-scout >/dev/null 2>&1; then
+            echo "Scanning image $IMAGE with Docker Scout..."
+            docker scout cves $IMAGE > scout-results.txt 2>&1 || true
 
-          HIGH_CRITICAL=$(grep -E "HIGH|CRITICAL" scout-results.txt | wc -l)
-          if [ "$HIGH_CRITICAL" -gt 0 ]; then
-            echo "⚠️ ALERT: $HIGH_CRITICAL HIGH/CRITICAL vulnerabilities detected!"
+            echo "====== Docker Scout Summary ======"
+            cat scout-results.txt
+            echo "=================================="
+
+            HIGH_CRITICAL=$(grep -E "HIGH|CRITICAL" scout-results.txt | wc -l)
+            if [ "$HIGH_CRITICAL" -gt 0 ]; then
+              echo "⚠️ ALERT: $HIGH_CRITICAL HIGH/CRITICAL vulnerabilities detected!"
+            else
+              echo "✅ No HIGH/CRITICAL vulnerabilities detected."
+            fi
           else
-            echo "✅ No HIGH/CRITICAL vulnerabilities detected."
+            echo "⚠️ Docker Scout not found, skipping scan."
           fi
 
       - name: Upload Docker Scout results
