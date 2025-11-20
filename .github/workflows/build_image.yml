@@ -168,7 +168,7 @@ jobs:
       - name: Prepare JSON for repository_dispatch
         id: prepare_json
         run: |
-          IMAGE_URI="${{ needs.build-and-push.outputs.image_latest }}"
+          IMAGE_URI="${{ needs.build-and-push.outputs.FULL_IMAGE_LATEST }}"
 
           JSON_BODY=$(jq -n -c \
             --arg image_uri "$IMAGE_URI" \
