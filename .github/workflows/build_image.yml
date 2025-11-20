@@ -144,13 +144,42 @@ jobs:
           echo "Build tag:    $FULL_IMAGE_BUILD"
           echo "================================"
 
-      # Trigger deployment workflow in another repo
-      - name: Trigger Deployment Workflow
-        uses: peter-evans/workflow-dispatch@v2
-        with:
-          # Nom de l'organisation et repo
-          repository: cyberlab-cley-security/deploy-webapp-demo
-          workflow: kustomize.yaml      
-          ref: main                     
-          inputs: |
-            IMAGE_URI=${{ steps.image-info.outputs.FULL_IMAGE_LATEST }}
+  dispatch-deploy:
+    name: Dispatch Deployment
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Prepare JSON body with only the latest image URI
+      - name: Prepare JSON for repository_dispatch
+        id: prepare_json
+        run: |
+          IMAGE_URI="${{ needs.build-and-push.outputs.image_latest }}"
+
+          JSON_BODY=$(jq -n -c \
+            --arg image_uri "$IMAGE_URI" \
+            '{
+              "event_type": "deploy-image",
+              "client_payload": {
+                "image_uri": $image_uri
+              }
+            }'
+          )
+
+          echo "JSON_BODY=$JSON_BODY" >> $GITHUB_ENV
+          echo "JSON body prepared for repository_dispatch:"
+          echo "$JSON_BODY"
+
+      # Send repository_dispatch to the target repo
+      - name: Send repository_dispatch to deploy-webapp-demo
+        run: |
+          echo "Sending repository_dispatch with body:"
+          echo "$JSON_BODY"
+          echo "$JSON_BODY" | gh api \
+            --method POST \
+            repos/cyberlab-cley-security/deploy-webapp-demo/dispatches \
+            --input -
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
