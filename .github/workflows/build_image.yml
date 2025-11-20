@@ -1,4 +1,4 @@
-name: Docker Build and Push to ECR - Single Input
+name: Docker Build and Push to ECR - Optimized
 
 on:
   workflow_dispatch:
@@ -18,39 +18,44 @@ on:
         required: true
         type: string
         default: 'us-east-1'
+      target_repository:
+        description: 'Target repository for deployment dispatch'
+        required: false
+        type: string
+        default: 'cyberlab-cley-security/deploy-webapp-demo'
 
 jobs:
-  build-vul-scan-and-push:
+  build-scan-and-push:
     runs-on: ubuntu-latest
 
-    # Les outputs sont définis à la fin via l'étape 'image-info'
     outputs:
       image_latest: ${{ steps.image-info.outputs.FULL_IMAGE_LATEST }}
       image_build: ${{ steps.image-info.outputs.FULL_IMAGE_BUILD }}
+      vuln_count: ${{ steps.grype_scan.outputs.HIGH_CRIT_COUNT }}
     
     steps:
-      # Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Parse ECR URI to extract registry and repository name
       - name: Parse ECR URI
         id: parse_ecr
         run: |
           ECR_URI="${{ github.event.inputs.ecr_repository_uri }}"
           
-          # Extract registry (host) and repository name
+          # Validation du format
+          if [[ ! "$ECR_URI" =~ ^[0-9]+\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/.+ ]]; then
+            echo "❌ Format ECR URI invalide: $ECR_URI"
+            exit 1
+          fi
+          
           ECR_REGISTRY=$(echo $ECR_URI | cut -d'/' -f1)
           ECR_REPOSITORY=$(echo $ECR_URI | cut -d'/' -f2-)
           
           echo "ECR_REGISTRY=$ECR_REGISTRY" >> $GITHUB_OUTPUT
           echo "ECR_REPOSITORY=$ECR_REPOSITORY" >> $GITHUB_OUTPUT
-          
-          echo "Parsed ECR URI:"
-          echo "  Registry: $ECR_REGISTRY"
-          echo "  Repository: $ECR_REPOSITORY"
-      
-      # Configure AWS credentials
+          echo "ECR Registry: $ECR_REGISTRY"
+          echo "ECR Repository: $ECR_REPOSITORY"
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -58,141 +63,180 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ github.event.inputs.aws_region }}
 
-      # Login to Amazon ECR
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
         with:
           registry: ${{ steps.parse_ecr.outputs.ECR_REGISTRY }}
 
-      # Ensure the ECR repository exists
       - name: Ensure ECR repository exists
         run: |
           REPO_NAME=${{ steps.parse_ecr.outputs.ECR_REPOSITORY }}
           AWS_REGION=${{ github.event.inputs.aws_region }}
-
+          
           if ! aws ecr describe-repositories --repository-names $REPO_NAME --region $AWS_REGION >/dev/null 2>&1; then
             echo "Repository does not exist. Creating..."
             aws ecr create-repository --repository-name $REPO_NAME --region $AWS_REGION
+            echo "Repository created successfully"
           else
-            echo "Repository already exists."
+            echo "Repository already exists"
           fi
 
-      # Build local image (for scanning)
+      # ---------- BUILD UNIQUE AVEC LOAD ET PUSH ----------
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build Docker image locally for scanning
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          load: true
-          tags: ${{ steps.parse_ecr.outputs.ECR_REPOSITORY }}:scan
-
-      # Install Docker Scout 
-      - name: Install Docker Scout
-        run: |
-          echo "Installing Docker Scout CLI..."
-          curl -fsSL https://raw.githubusercontent.com/docker/scout-cli/main/install.sh | VERSION=v1.18.3 sh
-          docker scout version || echo "⚠️ Docker Scout not installed, skipping scan"
-
-      - name: Docker login for Scout
-        run: |
-          echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
-
-      # Scan with Docker Scout 
-      - name: Security control - Scan image with Docker Scout
-        run: |
-          IMAGE=${{ steps.parse_ecr.outputs.ECR_REPOSITORY }}:scan
-          if command -v docker-scout >/dev/null 2>&1; then
-            echo "Scanning image $IMAGE with Docker Scout..."
-            docker scout cves $IMAGE > scout-results.txt 2>&1 || true
-
-            echo "====== Docker Scout Summary ======"
-            cat scout-results.txt
-            echo "=================================="
-
-            HIGH_CRITICAL=$(grep -E "HIGH|CRITICAL" scout-results.txt | wc -l)
-            if [ "$HIGH_CRITICAL" -gt 0 ]; then
-              echo "⚠️ ALERT: $HIGH_CRITICAL HIGH/CRITICAL vulnerabilities detected!"
-            else
-              echo "✅ No HIGH/CRITICAL vulnerabilities detected."
-            fi
-          else
-            echo "⚠️ Docker Scout not found, skipping scan."
-          fi
-
-      - name: Upload Docker Scout results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: docker-scout-results
-          path: scout-results.txt
-      
-      # Build and push image to ECR
-      - name: Build and push Docker image to ECR
+      - name: Build and push Docker image (optimized)
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
-          # Tags Docker, using two tags: the provided image_tag and the GitHub run number
+          load: true  # Charge également localement pour le scan
           tags: | 
+            ${{ steps.parse_ecr.outputs.ECR_REPOSITORY }}:scan
             ${{ github.event.inputs.ecr_repository_uri }}:${{ github.event.inputs.image_tag }}
             ${{ github.event.inputs.ecr_repository_uri }}:${{ github.run_number }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      # Output full image paths + export as outputs
+      # ---------- GRYPE SCAN (SOFT FAIL + ARTEFACT) ----------
+      - name: Install Grype
+        run: |
+          echo "📥 Installing Grype..."
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+          grype version
+
+      - name: Security Scan with Grype (soft fail)
+        id: grype_scan
+        run: |
+          IMAGE="${{ steps.parse_ecr.outputs.ECR_REPOSITORY }}:scan"
+
+          echo "🔍 Scanning image: $IMAGE"
+          grype "$IMAGE" -o json > grype-report.json 2>&1 || true
+          grype "$IMAGE" -o table > grype-report.txt 2>&1 || true
+
+          echo ""
+          echo "====== Grype Vulnerability Summary ======"
+          cat grype-report.json | jq -r '.matches[].vulnerability.severity' 2>/dev/null | sort | uniq -c || echo "No vulnerabilities found"
+          echo "=========================================="
+          echo ""
+
+          # Count vulnerabilities by severity
+          CRITICAL_COUNT=$(cat grype-report.json | jq '[.matches[].vulnerability.severity | select(. == "Critical")] | length' 2>/dev/null || echo 0)
+          HIGH_COUNT=$(cat grype-report.json | jq '[.matches[].vulnerability.severity | select(. == "High")] | length' 2>/dev/null || echo 0)
+          MEDIUM_COUNT=$(cat grype-report.json | jq '[.matches[].vulnerability.severity | select(. == "Medium")] | length' 2>/dev/null || echo 0)
+          LOW_COUNT=$(cat grype-report.json | jq '[.matches[].vulnerability.severity | select(. == "Low")] | length' 2>/dev/null || echo 0)
+          
+          HIGH_CRIT_COUNT=$((CRITICAL_COUNT + HIGH_COUNT))
+          
+          echo "CRITICAL_COUNT=$CRITICAL_COUNT" >> $GITHUB_OUTPUT
+          echo "HIGH_COUNT=$HIGH_COUNT" >> $GITHUB_OUTPUT
+          echo "MEDIUM_COUNT=$MEDIUM_COUNT" >> $GITHUB_OUTPUT
+          echo "LOW_COUNT=$LOW_COUNT" >> $GITHUB_OUTPUT
+          echo "HIGH_CRIT_COUNT=$HIGH_CRIT_COUNT" >> $GITHUB_OUTPUT
+
+          # Display summary with emojis
+          echo ""
+          echo "📊 Vulnerability Breakdown:"
+          echo "   🔴 Critical: $CRITICAL_COUNT"
+          echo "   🟠 High: $HIGH_COUNT"
+          echo "   🟡 Medium: $MEDIUM_COUNT"
+          echo "   🟢 Low: $LOW_COUNT"
+          echo ""
+          
+          if [ "$HIGH_CRIT_COUNT" -gt 0 ]; then
+            echo "⚠️  WARNING: $HIGH_CRIT_COUNT High/Critical vulnerabilities found!"
+            echo "⚠️  Build will continue (soft fail mode enabled)"
+          else
+            echo "✅ No High/Critical vulnerabilities detected"
+          fi
+
+          # Soft fail - never block the pipeline
+          exit 0
+
+      - name: Upload Grype reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grype-scan-reports
+          path: |
+            grype-report.json
+            grype-report.txt
+          retention-days: 30
+
+      - name: Comment vulnerability summary on commit
+        if: github.event_name == 'push' && always()
+        continue-on-error: true
+        run: |
+          SUMMARY="## 🔍 Security Scan Results
+          
+          **Image:** \`${{ github.event.inputs.ecr_repository_uri }}:${{ github.event.inputs.image_tag }}\`
+          
+          | Severity | Count |
+          |----------|-------|
+          | 🔴 Critical | ${{ steps.grype_scan.outputs.CRITICAL_COUNT }} |
+          | 🟠 High | ${{ steps.grype_scan.outputs.HIGH_COUNT }} |
+          | 🟡 Medium | ${{ steps.grype_scan.outputs.MEDIUM_COUNT }} |
+          | 🟢 Low | ${{ steps.grype_scan.outputs.LOW_COUNT }} |
+          
+          📄 Full report available in workflow artifacts"
+          
+          echo "$SUMMARY" >> $GITHUB_STEP_SUMMARY
+
       - name: Image pushed successfully
         id: image-info
         run: |
-          # Construction des chemins complets
           FULL_IMAGE_LATEST="${{ github.event.inputs.ecr_repository_uri }}:${{ github.event.inputs.image_tag }}"
           FULL_IMAGE_BUILD="${{ github.event.inputs.ecr_repository_uri }}:${{ github.run_number }}"
-
+          
           echo "FULL_IMAGE_LATEST=$FULL_IMAGE_LATEST" >> $GITHUB_OUTPUT
           echo "FULL_IMAGE_BUILD=$FULL_IMAGE_BUILD" >> $GITHUB_OUTPUT
-
-          echo "✔️ Docker image successfully built and pushed to ECR"
+          
           echo ""
-          echo "===== Full Image Paths ====="
-          echo "Latest tag:   $FULL_IMAGE_LATEST"
-          echo "Build tag:    $FULL_IMAGE_BUILD"
-          echo "================================"
+          echo "Docker images successfully built and pushed:"
+          echo "   Latest: $FULL_IMAGE_LATEST"
+          echo "   Build: $FULL_IMAGE_BUILD"
 
+  # ---------- DISPATCH DEPLOYMENT ----------
   dispatch-deploy:
     name: Dispatch Deployment
     runs-on: ubuntu-latest
-    needs: build-and-push
+    needs: build-scan-and-push
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Prepare JSON body with only the latest image URI
-      - name: Prepare JSON for repository_dispatch
-        id: prepare_json
+      - name: Prepare and send deployment dispatch
         run: |
-          IMAGE_URI="${{ needs.build-and-push.outputs.FULL_IMAGE_LATEST }}"
+          IMAGE_URI="${{ needs.build-scan-and-push.outputs.image_latest }}"
+          TARGET_REPO="${{ github.event.inputs.target_repository }}"
+          VULN_COUNT="${{ needs.build-scan-and-push.outputs.vuln_count }}"
 
           JSON_BODY=$(jq -n -c \
             --arg image_uri "$IMAGE_URI" \
+            --arg vuln_count "$VULN_COUNT" \
             '{
               "event_type": "deploy-image",
               "client_payload": {
-                "image_uri": $image_uri
+                "image_uri": $image_uri,
+                "vulnerabilities": {
+                  "high_critical_count": $vuln_count
+                },
+                "source_workflow": "${{ github.workflow }}",
+                "source_run_id": "${{ github.run_id }}"
               }
             }'
           )
+          
+          echo "Dispatching deployment to: $TARGET_REPO"
+          echo "Image: $IMAGE_URI"
+          echo "Vulnerabilities (High/Critical): $VULN_COUNT"
+          echo ""
+          echo "$JSON_BODY" | jq '.'
 
-          echo "JSON_BODY=$JSON_BODY" >> $GITHUB_ENV
-          echo "JSON body prepared for repository_dispatch:"
-          echo "$JSON_BODY"
-
-      # Send repository_dispatch to the target repo
-      - name: Send repository_dispatch to deploy-webapp-demo
-        run: |
-          echo "Sending repository_dispatch with body:"
-          echo "$JSON_BODY"
           echo "$JSON_BODY" | gh api \
             --method POST \
-            repos/cyberlab-cley-security/deploy-webapp-demo/dispatches \
-            --input -
+            "repos/$TARGET_REPO/dispatches" \
+            --input - && echo "✅ Dispatch sent successfully" || echo "❌ Dispatch failed"
         env:
           GH_TOKEN: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
