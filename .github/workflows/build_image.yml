@@ -100,7 +100,7 @@ jobs:
           echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
 
       # Scan with Docker Scout 
-      - name: Scan image with Docker Scout
+      - name: Security control - Scan image with Docker Scout
         run: |
           IMAGE=${{ steps.parse_ecr.outputs.ECR_REPOSITORY }}:scan
           if command -v docker-scout >/dev/null 2>&1; then
@@ -138,9 +138,6 @@ jobs:
           tags: | 
             ${{ github.event.inputs.ecr_repository_uri }}:${{ github.event.inputs.image_tag }}
             ${{ github.event.inputs.ecr_repository_uri }}:${{ github.run_number }}
-          # Utilise la concaténation pour le cache (avec la syntaxe corrigée)
-          cache-from: type=registry,ref=${{ github.event.inputs.ecr_repository_uri }}:buildcache
-          cache-to: type=registry,ref=${{ github.event.inputs.ecr_repository_uri }}:buildcache,mode=max
 
       # Output full image paths + export as outputs
       - name: Image pushed successfully
