@@ -119,9 +119,9 @@ jobs:
           context: .
           push: true
           # Tags Docker, using two tags: the provided image_tag and the GitHub run number
-          tags: 
-            - ${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.ecr_repository }}:${{ github.event.inputs.image_tag }}
-            - ${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.ecr_repository }}:${{ github.run_number }}
+          tags: | 
+            ${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.ecr_repository }}:${{ github.event.inputs.image_tag }}
+            ${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.ecr_repository }}:${{ github.run_number }}
           # Utilise la concaténation pour le cache (avec la syntaxe corrigée)
           cache-from: type=registry,ref=${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.ecr_repository }}:buildcache
           cache-to: type=registry,ref=${{ github.event.inputs.ecr_registry }}/${{ github.event.inputs.ecr_repository }}:buildcache,mode=max
