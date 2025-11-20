@@ -22,10 +22,10 @@ on:
         description: 'Target repository for deployment dispatch'
         required: false
         type: string
-        default: 'cyberlab-cley-security/deploy-webapp-demo'
+        default: 'cyberlab-cley-security/3-deploy-webapp-demo'
 
 jobs:
-  build-scan-and-push:
+  build-vuln-scan-and-push:
     runs-on: ubuntu-latest
 
     outputs:
@@ -53,8 +53,8 @@ jobs:
           
           echo "ECR_REGISTRY=$ECR_REGISTRY" >> $GITHUB_OUTPUT
           echo "ECR_REPOSITORY=$ECR_REPOSITORY" >> $GITHUB_OUTPUT
-          echo "ECR Registry: $ECR_REGISTRY"
-          echo "ECR Repository: $ECR_REPOSITORY"
+          echo "✅ ECR Registry: $ECR_REGISTRY"
+          echo "✅ ECR Repository: $ECR_REPOSITORY"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -74,29 +74,27 @@ jobs:
           AWS_REGION=${{ github.event.inputs.aws_region }}
           
           if ! aws ecr describe-repositories --repository-names $REPO_NAME --region $AWS_REGION >/dev/null 2>&1; then
-            echo "Repository does not exist. Creating..."
+            echo "📦 Repository does not exist. Creating..."
             aws ecr create-repository --repository-name $REPO_NAME --region $AWS_REGION
-            echo "Repository created successfully"
+            echo "✅ Repository created successfully"
           else
-            echo "Repository already exists"
+            echo "✅ Repository already exists"
           fi
 
-      # ---------- BUILD UNIQUE AVEC LOAD ET PUSH ----------
+      # ---------- BUILD OPTIMISÉ AVEC CACHE ----------
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push Docker image (optimized)
+      - name: Build Docker image with cache
         uses: docker/build-push-action@v5
         with:
           context: .
-          push: true
-          load: true  # Charge également localement pour le scan
-          tags: | 
-            ${{ steps.parse_ecr.outputs.ECR_REPOSITORY }}:scan
-            ${{ github.event.inputs.ecr_repository_uri }}:${{ github.event.inputs.image_tag }}
-            ${{ github.event.inputs.ecr_repository_uri }}:${{ github.run_number }}
+          push: false
+          load: true
+          tags: ${{ steps.parse_ecr.outputs.ECR_REPOSITORY }}:scan
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          outputs: type=docker
 
       # ---------- GRYPE SCAN (SOFT FAIL + ARTEFACT) ----------
       - name: Install Grype
@@ -153,6 +151,23 @@ jobs:
           # Soft fail - never block the pipeline
           exit 0
 
+      # ---------- TAG ET PUSH VERS ECR ----------
+      - name: Tag and push to ECR
+        run: |
+          IMAGE_LOCAL="${{ steps.parse_ecr.outputs.ECR_REPOSITORY }}:scan"
+          IMAGE_LATEST="${{ github.event.inputs.ecr_repository_uri }}:${{ github.event.inputs.image_tag }}"
+          IMAGE_BUILD="${{ github.event.inputs.ecr_repository_uri }}:${{ github.run_number }}"
+          
+          echo "🏷️  Tagging images..."
+          docker tag "$IMAGE_LOCAL" "$IMAGE_LATEST"
+          docker tag "$IMAGE_LOCAL" "$IMAGE_BUILD"
+          
+          echo "📤 Pushing to ECR..."
+          docker push "$IMAGE_LATEST"
+          docker push "$IMAGE_BUILD"
+          
+          echo "✅ Images pushed successfully"
+
       - name: Upload Grype reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -192,15 +207,15 @@ jobs:
           echo "FULL_IMAGE_BUILD=$FULL_IMAGE_BUILD" >> $GITHUB_OUTPUT
           
           echo ""
-          echo "Docker images successfully built and pushed:"
-          echo "   Latest: $FULL_IMAGE_LATEST"
-          echo "   Build: $FULL_IMAGE_BUILD"
+          echo "✅ Docker images successfully built and pushed:"
+          echo "   📦 Latest: $FULL_IMAGE_LATEST"
+          echo "   📦 Build: $FULL_IMAGE_BUILD"
 
   # ---------- DISPATCH DEPLOYMENT ----------
   dispatch-deploy:
     name: Dispatch Deployment
     runs-on: ubuntu-latest
-    needs: build-scan-and-push
+    needs: build-vuln-scan-and-push
 
     steps:
       - name: Checkout repository
@@ -208,9 +223,9 @@ jobs:
 
       - name: Prepare and send deployment dispatch
         run: |
-          IMAGE_URI="${{ needs.build-scan-and-push.outputs.image_latest }}"
+          IMAGE_URI="${{ needs.build-vuln-scan-and-push.outputs.image_latest }}"
           TARGET_REPO="${{ github.event.inputs.target_repository }}"
-          VULN_COUNT="${{ needs.build-scan-and-push.outputs.vuln_count }}"
+          VULN_COUNT="${{ needs.build-vuln-scan-and-push.outputs.vuln_count }}"
 
           JSON_BODY=$(jq -n -c \
             --arg image_uri "$IMAGE_URI" \
@@ -228,9 +243,9 @@ jobs:
             }'
           )
           
-          echo "Dispatching deployment to: $TARGET_REPO"
-          echo "Image: $IMAGE_URI"
-          echo "Vulnerabilities (High/Critical): $VULN_COUNT"
+          echo "🚀 Dispatching deployment to: $TARGET_REPO"
+          echo "📦 Image: $IMAGE_URI"
+          echo "⚠️  Vulnerabilities (High/Critical): $VULN_COUNT"
           echo ""
           echo "$JSON_BODY" | jq '.'
 
