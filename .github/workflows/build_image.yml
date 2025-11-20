@@ -20,7 +20,7 @@ on:
         default: 'us-east-1'
 
 jobs:
-  build-and-push:
+  build-vul-scan-and-push:
     runs-on: ubuntu-latest
 
     # Les outputs sont définis à la fin via l'étape 'image-info'
