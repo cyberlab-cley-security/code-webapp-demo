@@ -9,8 +9,7 @@ app.use(bodyParser.json());
 app.use(express.static("public"));
 
 // Configure Nunjucks for rendering templates
-// ⚠️ VULNÉRABLE : autoescape désactivé pour les démos SSTI
-nunjucks.configure({ autoescape: false });
+nunjucks.configure({ autoescape: true });
 
 const PORT = process.env.PORT || 3000;
 
@@ -71,16 +70,11 @@ app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
-// Custom 404 page route - VULNÉRABLE à SSTI
+// Custom 404 page route
 app.get("/page", (req, res) => {
   const errorMessage = `<h2> Unable to find ${req.query.name} </h2>`;
   const rendered = nunjucks.renderString(errorMessage);
   res.status(404).send(rendered);
-});
-
-// Endpoint de santé pour les probes Kubernetes
-app.get("/health", (req, res) => {
-  res.status(200).send("OK");
 });
 
 // ------------------------
