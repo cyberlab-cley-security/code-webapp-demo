@@ -182,4 +182,4 @@ jobs:
             repos/cyberlab-cley-security/deploy-webapp-demo/dispatches \
             --input -
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
+          GH_TOKEN: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
