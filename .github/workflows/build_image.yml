@@ -3,7 +3,7 @@ name: Docker Build and Push to ECR - Optimized
 on:
   repository_dispatch:
     types:
-      - trigger-webapp-build  # événement attendu depuis le repo déclencheur
+      - trigger-webapp-build  
 
 jobs:
   build-vuln-scan-and-push:
@@ -22,30 +22,23 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Parse ECR image path
+      - name: Parse ECR URI
         id: parse_ecr
         run: |
-          IMAGE_PATH="${IMAGE_PATH}"
-
-          # Validation du format <registry>/<repository>:tag
-          if [[ ! "$IMAGE_PATH" =~ ^[0-9]+\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/.+:.+ ]]; then
-            echo "❌ Format invalide: $IMAGE_PATH"
+          ECR_URI="${{ github.event.client_payload.ecr_url }}"
+          
+          if [[ ! "$ECR_URI" =~ ^[0-9]+\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/.+ ]]; then
+            echo "❌ Format ECR URI invalide: $ECR_URI"
             exit 1
           fi
-
-          ECR_REGISTRY=$(echo "$IMAGE_PATH" | cut -d'/' -f1)
-          ECR_REPOSITORY=$(echo "$IMAGE_PATH" | cut -d'/' -f2- | cut -d':' -f1)
-          IMAGE_TAG=$(echo "$IMAGE_PATH" | cut -d':' -f2)
-
+          
+          ECR_REGISTRY=$(echo $ECR_URI | cut -d'/' -f1)
+          ECR_REPOSITORY=$(echo $ECR_URI | cut -d'/' -f2-)
+          
           echo "ECR_REGISTRY=$ECR_REGISTRY" >> $GITHUB_OUTPUT
           echo "ECR_REPOSITORY=$ECR_REPOSITORY" >> $GITHUB_OUTPUT
-          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_OUTPUT
-          echo "ECR_URI=$ECR_REGISTRY/$ECR_REPOSITORY" >> $GITHUB_OUTPUT
-
           echo "✅ ECR Registry: $ECR_REGISTRY"
           echo "✅ ECR Repository: $ECR_REPOSITORY"
-          echo "✅ Image Tag: $IMAGE_TAG"
-          echo "✅ Base URI: $ECR_REGISTRY/$ECR_REPOSITORY"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -62,7 +55,6 @@ jobs:
       - name: Ensure ECR repository exists
         run: |
           REPO_NAME=${{ steps.parse_ecr.outputs.ECR_REPOSITORY }}
-          AWS_REGION=${{ env.AWS_REGION }}
           
           if ! aws ecr describe-repositories --repository-names $REPO_NAME --region $AWS_REGION >/dev/null 2>&1; then
             echo "📦 Repository does not exist. Creating..."
@@ -96,24 +88,37 @@ jobs:
         id: grype_scan
         run: |
           IMAGE="${{ steps.parse_ecr.outputs.ECR_REPOSITORY }}:scan"
+
+          echo "🔍 Scanning image: $IMAGE"
           grype "$IMAGE" -o json > grype-report.json 2>&1 || true
           grype "$IMAGE" -o table > grype-report.txt 2>&1 || true
 
           CRITICAL_COUNT=$(cat grype-report.json | jq '[.matches[].vulnerability.severity | select(. == "Critical")] | length' 2>/dev/null || echo 0)
           HIGH_COUNT=$(cat grype-report.json | jq '[.matches[].vulnerability.severity | select(. == "High")] | length' 2>/dev/null || echo 0)
+          MEDIUM_COUNT=$(cat grype-report.json | jq '[.matches[].vulnerability.severity | select(. == "Medium")] | length' 2>/dev/null || echo 0)
+          LOW_COUNT=$(cat grype-report.json | jq '[.matches[].vulnerability.severity | select(. == "Low")] | length' 2>/dev/null || echo 0)
+          
           HIGH_CRIT_COUNT=$((CRITICAL_COUNT + HIGH_COUNT))
-
+          
           echo "CRITICAL_COUNT=$CRITICAL_COUNT" >> $GITHUB_OUTPUT
           echo "HIGH_COUNT=$HIGH_COUNT" >> $GITHUB_OUTPUT
+          echo "MEDIUM_COUNT=$MEDIUM_COUNT" >> $GITHUB_OUTPUT
+          echo "LOW_COUNT=$LOW_COUNT" >> $GITHUB_OUTPUT
           echo "HIGH_CRIT_COUNT=$HIGH_CRIT_COUNT" >> $GITHUB_OUTPUT
+
+          exit 0
 
       - name: Tag and push to ECR
         run: |
           IMAGE_LOCAL="${{ steps.parse_ecr.outputs.ECR_REPOSITORY }}:scan"
-          IMAGE_BUILD="${{ steps.parse_ecr.outputs.ECR_URI }}:${{ steps.parse_ecr.outputs.IMAGE_TAG }}"
+          IMAGE_BUILD="${{ env.IMAGE_PATH }}-${GITHUB_RUN_NUMBER}"
+          
           docker tag "$IMAGE_LOCAL" "$IMAGE_BUILD"
+          
+          echo "📤 Pushing to ECR..."
           docker push "$IMAGE_BUILD"
-          echo "✅ Image pushed: $IMAGE_BUILD"
+          
+          echo "✅ Image pushed successfully"
 
       - name: Upload Grype reports
         if: always()
@@ -128,5 +133,50 @@ jobs:
       - name: Image pushed successfully
         id: image-info
         run: |
-          FULL_IMAGE_BUILD="${{ steps.parse_ecr.outputs.ECR_URI }}:${{ steps.parse_ecr.outputs.IMAGE_TAG }}"
+          FULL_IMAGE_BUILD="${{ env.IMAGE_PATH }}-${GITHUB_RUN_NUMBER}"
           echo "FULL_IMAGE_BUILD=$FULL_IMAGE_BUILD" >> $GITHUB_OUTPUT
+          echo "✅ Docker image built and pushed: $FULL_IMAGE_BUILD"
+
+  dispatch-deploy:
+    name: Dispatch Deployment
+    runs-on: ubuntu-latest
+    needs: build-vuln-scan-and-push
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare and send deployment dispatch
+        run: |
+          IMAGE_URI="${{ needs.build-vuln-scan-and-push.outputs.image_build }}"
+          TARGET_REPO="${{ env.TARGET_REPO }}"
+          VULN_COUNT="${{ needs.build-vuln-scan-and-push.outputs.vuln_count }}"
+
+          JSON_BODY=$(jq -n -c \
+            --arg image_uri "$IMAGE_URI" \
+            --arg vuln_count "$VULN_COUNT" \
+            '{
+              "event_type": "deploy-image",
+              "client_payload": {
+                "image_uri": $image_uri,
+                "vulnerabilities": {
+                  "high_critical_count": $vuln_count
+                },
+                "source_workflow": "${{ github.workflow }}",
+                "source_run_id": "${{ github.run_id }}"
+              }
+            }'
+          )
+          
+          echo "🚀 Dispatching deployment to: $TARGET_REPO"
+          echo "📦 Image: $IMAGE_URI"
+          echo "⚠️  Vulnerabilities (High/Critical): $VULN_COUNT"
+          echo ""
+          echo "$JSON_BODY" | jq '.'
+
+          echo "$JSON_BODY" | gh api \
+            --method POST \
+            "repos/$TARGET_REPO/dispatches" \
+            --input - && echo "✅ Dispatch sent successfully" || echo "❌ Dispatch failed"
+        env:
+          GH_TOKEN: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
