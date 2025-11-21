@@ -3,16 +3,11 @@ name: Docker Build and Push to ECR - Optimized
 on:
   workflow_dispatch:
     inputs:
-      ecr_repository_uri:
-        description: 'AWS ECR Repository URI (e.g., 123456789.dkr.ecr.us-east-1.amazonaws.com/lab)'
+      image_path:
+        description: 'Full ECR image path <registry>/<repository>:<tag> (e.g., 123456789.dkr.ecr.us-east-1.amazonaws.com/lab:latest)'
         required: true
         type: string
-        default: '<CHANGE ME>' 
-      image_tag:
-        description: 'Docker image tag (e.g., latest, v1.0.0)'
-        required: true
-        type: string
-        default: 'latest'
+        default: '<CHANGE ME>'
       aws_region:
         description: 'AWS region'
         required: true
@@ -37,24 +32,35 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Parse ECR URI
+      - name: Parse ECR image path
         id: parse_ecr
         run: |
-          ECR_URI="${{ github.event.inputs.ecr_repository_uri }}"
+          IMAGE_PATH="${{ github.event.inputs.image_path }}"
           
-          # Validation du format
-          if [[ ! "$ECR_URI" =~ ^[0-9]+\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/.+ ]]; then
-            echo "❌ Format ECR URI invalide: $ECR_URI"
+          # Validation du format complet <registry>/<repository>:<tag>
+          if [[ ! "$IMAGE_PATH" =~ ^[0-9]+\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/.+:.+ ]]; then
+            echo "❌ Format invalide: $IMAGE_PATH"
+            echo "✅ Format attendu: <registry>/<repository>:<tag>"
+            echo "   Exemple: 123456789.dkr.ecr.us-east-1.amazonaws.com/lab:latest"
             exit 1
           fi
           
-          ECR_REGISTRY=$(echo $ECR_URI | cut -d'/' -f1)
-          ECR_REPOSITORY=$(echo $ECR_URI | cut -d'/' -f2-)
+          # Extraction des composants
+          ECR_REGISTRY=$(echo "$IMAGE_PATH" | cut -d'/' -f1)
+          REPO_AND_TAG=$(echo "$IMAGE_PATH" | cut -d'/' -f2-)
+          ECR_REPOSITORY=$(echo "$REPO_AND_TAG" | cut -d':' -f1)
+          IMAGE_TAG=$(echo "$REPO_AND_TAG" | cut -d':' -f2)
+          ECR_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}"
           
           echo "ECR_REGISTRY=$ECR_REGISTRY" >> $GITHUB_OUTPUT
           echo "ECR_REPOSITORY=$ECR_REPOSITORY" >> $GITHUB_OUTPUT
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "ECR_URI=$ECR_URI" >> $GITHUB_OUTPUT
+          
           echo "✅ ECR Registry: $ECR_REGISTRY"
           echo "✅ ECR Repository: $ECR_REPOSITORY"
+          echo "✅ Image Tag: $IMAGE_TAG"
+          echo "✅ Full URI: $ECR_URI"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -155,8 +161,8 @@ jobs:
       - name: Tag and push to ECR
         run: |
           IMAGE_LOCAL="${{ steps.parse_ecr.outputs.ECR_REPOSITORY }}:scan"
-          IMAGE_LATEST="${{ github.event.inputs.ecr_repository_uri }}:${{ github.event.inputs.image_tag }}"
-          IMAGE_BUILD="${{ github.event.inputs.ecr_repository_uri }}:${{ github.run_number }}"
+          IMAGE_LATEST="${{ steps.parse_ecr.outputs.ECR_URI }}:${{ steps.parse_ecr.outputs.IMAGE_TAG }}"
+          IMAGE_BUILD="${{ steps.parse_ecr.outputs.ECR_URI }}:${{ github.run_number }}"
           
           echo "🏷️  Tagging images..."
           docker tag "$IMAGE_LOCAL" "$IMAGE_LATEST"
@@ -184,7 +190,7 @@ jobs:
         run: |
           SUMMARY="## 🔍 Security Scan Results
           
-          **Image:** \`${{ github.event.inputs.ecr_repository_uri }}:${{ github.event.inputs.image_tag }}\`
+          **Image:** \`${{ github.event.inputs.image_path }}\`
           
           | Severity | Count |
           |----------|-------|
@@ -200,8 +206,8 @@ jobs:
       - name: Image pushed successfully
         id: image-info
         run: |
-          FULL_IMAGE_LATEST="${{ github.event.inputs.ecr_repository_uri }}:${{ github.event.inputs.image_tag }}"
-          FULL_IMAGE_BUILD="${{ github.event.inputs.ecr_repository_uri }}:${{ github.run_number }}"
+          FULL_IMAGE_LATEST="${{ steps.parse_ecr.outputs.ECR_URI }}:${{ steps.parse_ecr.outputs.IMAGE_TAG }}"
+          FULL_IMAGE_BUILD="${{ steps.parse_ecr.outputs.ECR_URI }}:${{ github.run_number }}"
           
           echo "FULL_IMAGE_LATEST=$FULL_IMAGE_LATEST" >> $GITHUB_OUTPUT
           echo "FULL_IMAGE_BUILD=$FULL_IMAGE_BUILD" >> $GITHUB_OUTPUT
