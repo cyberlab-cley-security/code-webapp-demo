@@ -142,6 +142,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-vuln-scan-and-push
 
+    env:
+      IMAGE_PATH: ${{ github.event.client_payload.ecr_url }}:${{ github.event.client_payload.image_tag }}
+      AWS_REGION: ${{ github.event.client_payload.aws_region }}
+      TARGET_REPO: ${{ github.event.client_payload.target_repository || 'cyberlab-cley-security/3-deploy-webapp-demo' }}
+      
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
