@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       image_path:
-        description: 'Full ECR image path <registry>/<repository>:<tag> (e.g., 123456789.dkr.ecr.us-east-1.amazonaws.com/lab:latest)'
+        description: 'ECR image path <registry>/<repository> (e.g., 123456789.dkr.ecr.us-east-1.amazonaws.com/lab)'
         required: true
         type: string
         default: '<CHANGE ME>'
@@ -24,10 +24,9 @@ jobs:
     runs-on: ubuntu-latest
 
     outputs:
-      image_latest: ${{ steps.image-info.outputs.FULL_IMAGE_LATEST }}
       image_build: ${{ steps.image-info.outputs.FULL_IMAGE_BUILD }}
       vuln_count: ${{ steps.grype_scan.outputs.HIGH_CRIT_COUNT }}
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -36,31 +35,33 @@ jobs:
         id: parse_ecr
         run: |
           IMAGE_PATH="${{ github.event.inputs.image_path }}"
-          
-          # Validation du format complet <registry>/<repository>:<tag>
-          if [[ ! "$IMAGE_PATH" =~ ^[0-9]+\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/.+:.+ ]]; then
+
+          # Validation du format <registry>/<repository> (sans tag)
+          if [[ ! "$IMAGE_PATH" =~ ^[0-9]+\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/.+$ ]]; then
             echo "❌ Format invalide: $IMAGE_PATH"
-            echo "✅ Format attendu: <registry>/<repository>:<tag>"
-            echo "   Exemple: 123456789.dkr.ecr.us-east-1.amazonaws.com/lab:latest"
+            echo "✅ Format attendu: <registry>/<repository>"
             exit 1
           fi
-          
-          # Extraction des composants
+
+          if [[ "$IMAGE_PATH" =~ :.+ ]]; then
+            echo "❌ Le tag ne doit pas être inclus dans l'image path"
+            echo "✅ Le tag sera généré automatiquement: build-${{ github.run_number }}"
+            exit 1
+          fi
+
           ECR_REGISTRY=$(echo "$IMAGE_PATH" | cut -d'/' -f1)
-          REPO_AND_TAG=$(echo "$IMAGE_PATH" | cut -d'/' -f2-)
-          ECR_REPOSITORY=$(echo "$REPO_AND_TAG" | cut -d':' -f1)
-          IMAGE_TAG=$(echo "$REPO_AND_TAG" | cut -d':' -f2)
-          ECR_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}"
-          
+          ECR_REPOSITORY=$(echo "$IMAGE_PATH" | cut -d'/' -f2-)
+          IMAGE_TAG="build-${{ github.run_number }}"
+
           echo "ECR_REGISTRY=$ECR_REGISTRY" >> $GITHUB_OUTPUT
           echo "ECR_REPOSITORY=$ECR_REPOSITORY" >> $GITHUB_OUTPUT
           echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_OUTPUT
-          echo "ECR_URI=$ECR_URI" >> $GITHUB_OUTPUT
-          
+          echo "ECR_URI=$IMAGE_PATH" >> $GITHUB_OUTPUT
+
           echo "✅ ECR Registry: $ECR_REGISTRY"
           echo "✅ ECR Repository: $ECR_REPOSITORY"
           echo "✅ Image Tag: $IMAGE_TAG"
-          echo "✅ Full URI: $ECR_URI"
+          echo "✅ Base URI: $IMAGE_PATH"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -87,7 +88,6 @@ jobs:
             echo "✅ Repository already exists"
           fi
 
-      # ---------- BUILD OPTIMISÉ AVEC CACHE ----------
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -102,7 +102,6 @@ jobs:
           cache-to: type=gha,mode=max
           outputs: type=docker
 
-      # ---------- GRYPE SCAN (SOFT FAIL + ARTEFACT) ----------
       - name: Install Grype
         run: |
           echo "📥 Installing Grype..."
@@ -113,66 +112,34 @@ jobs:
         id: grype_scan
         run: |
           IMAGE="${{ steps.parse_ecr.outputs.ECR_REPOSITORY }}:scan"
-
-          echo "🔍 Scanning image: $IMAGE"
           grype "$IMAGE" -o json > grype-report.json 2>&1 || true
           grype "$IMAGE" -o table > grype-report.txt 2>&1 || true
 
-          echo ""
-          echo "====== Grype Vulnerability Summary ======"
-          cat grype-report.json | jq -r '.matches[].vulnerability.severity' 2>/dev/null | sort | uniq -c || echo "No vulnerabilities found"
-          echo "=========================================="
-          echo ""
-
-          # Count vulnerabilities by severity
           CRITICAL_COUNT=$(cat grype-report.json | jq '[.matches[].vulnerability.severity | select(. == "Critical")] | length' 2>/dev/null || echo 0)
           HIGH_COUNT=$(cat grype-report.json | jq '[.matches[].vulnerability.severity | select(. == "High")] | length' 2>/dev/null || echo 0)
           MEDIUM_COUNT=$(cat grype-report.json | jq '[.matches[].vulnerability.severity | select(. == "Medium")] | length' 2>/dev/null || echo 0)
           LOW_COUNT=$(cat grype-report.json | jq '[.matches[].vulnerability.severity | select(. == "Low")] | length' 2>/dev/null || echo 0)
-          
           HIGH_CRIT_COUNT=$((CRITICAL_COUNT + HIGH_COUNT))
-          
+
           echo "CRITICAL_COUNT=$CRITICAL_COUNT" >> $GITHUB_OUTPUT
           echo "HIGH_COUNT=$HIGH_COUNT" >> $GITHUB_OUTPUT
           echo "MEDIUM_COUNT=$MEDIUM_COUNT" >> $GITHUB_OUTPUT
           echo "LOW_COUNT=$LOW_COUNT" >> $GITHUB_OUTPUT
           echo "HIGH_CRIT_COUNT=$HIGH_CRIT_COUNT" >> $GITHUB_OUTPUT
 
-          # Display summary with emojis
-          echo ""
-          echo "📊 Vulnerability Breakdown:"
-          echo "   🔴 Critical: $CRITICAL_COUNT"
-          echo "   🟠 High: $HIGH_COUNT"
-          echo "   🟡 Medium: $MEDIUM_COUNT"
-          echo "   🟢 Low: $LOW_COUNT"
-          echo ""
-          
-          if [ "$HIGH_CRIT_COUNT" -gt 0 ]; then
-            echo "⚠️  WARNING: $HIGH_CRIT_COUNT High/Critical vulnerabilities found!"
-            echo "⚠️  Build will continue (soft fail mode enabled)"
-          else
-            echo "✅ No High/Critical vulnerabilities detected"
-          fi
-
-          # Soft fail - never block the pipeline
-          exit 0
-
-      # ---------- TAG ET PUSH VERS ECR ----------
       - name: Tag and push to ECR
         run: |
           IMAGE_LOCAL="${{ steps.parse_ecr.outputs.ECR_REPOSITORY }}:scan"
-          IMAGE_LATEST="${{ steps.parse_ecr.outputs.ECR_URI }}:${{ steps.parse_ecr.outputs.IMAGE_TAG }}"
-          IMAGE_BUILD="${{ steps.parse_ecr.outputs.ECR_URI }}:${{ github.run_number }}"
-          
-          echo "🏷️  Tagging images..."
-          docker tag "$IMAGE_LOCAL" "$IMAGE_LATEST"
+          IMAGE_BUILD="${{ steps.parse_ecr.outputs.ECR_URI }}:${{ steps.parse_ecr.outputs.IMAGE_TAG }}"
+
+          echo "🏷️  Tagging image..."
           docker tag "$IMAGE_LOCAL" "$IMAGE_BUILD"
-          
+
           echo "📤 Pushing to ECR..."
-          docker push "$IMAGE_LATEST"
           docker push "$IMAGE_BUILD"
-          
-          echo "✅ Images pushed successfully"
+
+          echo "✅ Image pushed successfully"
+          echo "   📦 Build: $IMAGE_BUILD"
 
       - name: Upload Grype reports
         if: always()
@@ -184,40 +151,13 @@ jobs:
             grype-report.txt
           retention-days: 30
 
-      - name: Comment vulnerability summary on commit
-        if: github.event_name == 'push' && always()
-        continue-on-error: true
-        run: |
-          SUMMARY="## 🔍 Security Scan Results
-          
-          **Image:** \`${{ github.event.inputs.image_path }}\`
-          
-          | Severity | Count |
-          |----------|-------|
-          | 🔴 Critical | ${{ steps.grype_scan.outputs.CRITICAL_COUNT }} |
-          | 🟠 High | ${{ steps.grype_scan.outputs.HIGH_COUNT }} |
-          | 🟡 Medium | ${{ steps.grype_scan.outputs.MEDIUM_COUNT }} |
-          | 🟢 Low | ${{ steps.grype_scan.outputs.LOW_COUNT }} |
-          
-          📄 Full report available in workflow artifacts"
-          
-          echo "$SUMMARY" >> $GITHUB_STEP_SUMMARY
-
       - name: Image pushed successfully
         id: image-info
         run: |
-          FULL_IMAGE_LATEST="${{ steps.parse_ecr.outputs.ECR_URI }}:${{ steps.parse_ecr.outputs.IMAGE_TAG }}"
-          FULL_IMAGE_BUILD="${{ steps.parse_ecr.outputs.ECR_URI }}:${{ github.run_number }}"
-          
-          echo "FULL_IMAGE_LATEST=$FULL_IMAGE_LATEST" >> $GITHUB_OUTPUT
+          FULL_IMAGE_BUILD="${{ steps.parse_ecr.outputs.ECR_URI }}:${{ steps.parse_ecr.outputs.IMAGE_TAG }}"
           echo "FULL_IMAGE_BUILD=$FULL_IMAGE_BUILD" >> $GITHUB_OUTPUT
-          
-          echo ""
-          echo "✅ Docker images successfully built and pushed:"
-          echo "   📦 Latest: $FULL_IMAGE_LATEST"
-          echo "   📦 Build: $FULL_IMAGE_BUILD"
+          echo "✅ Docker image successfully built and pushed: $FULL_IMAGE_BUILD"
 
-  # ---------- DISPATCH DEPLOYMENT ----------
   dispatch-deploy:
     name: Dispatch Deployment
     runs-on: ubuntu-latest
@@ -229,7 +169,7 @@ jobs:
 
       - name: Prepare and send deployment dispatch
         run: |
-          IMAGE_URI="${{ needs.build-vuln-scan-and-push.outputs.image_latest }}"
+          IMAGE_URI="${{ needs.build-vuln-scan-and-push.outputs.image_build }}"
           TARGET_REPO="${{ github.event.inputs.target_repository }}"
           VULN_COUNT="${{ needs.build-vuln-scan-and-push.outputs.vuln_count }}"
 
@@ -248,13 +188,10 @@ jobs:
               }
             }'
           )
-          
+
           echo "🚀 Dispatching deployment to: $TARGET_REPO"
           echo "📦 Image: $IMAGE_URI"
           echo "⚠️  Vulnerabilities (High/Critical): $VULN_COUNT"
-          echo ""
-          echo "$JSON_BODY" | jq '.'
-
           echo "$JSON_BODY" | gh api \
             --method POST \
             "repos/$TARGET_REPO/dispatches" \
