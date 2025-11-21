@@ -1,38 +1,23 @@
 name: Docker Build and Push to ECR - Optimized
 
 on:
-  workflow_dispatch:
-    inputs:
-      ecr_repository_uri:
-        description: 'AWS ECR Repository URI (e.g., 123456789.dkr.ecr.us-east-1.amazonaws.com/lab)'
-        required: true
-        type: string
-        default: '<CHANGE ME>' 
-      image_tag:
-        description: 'Docker image tag (e.g., latest, v1.0.0)'
-        required: true
-        type: string
-        default: 'latest'
-      aws_region:
-        description: 'AWS region'
-        required: true
-        type: string
-        default: 'us-east-1'
-      target_repository:
-        description: 'Target repository for deployment dispatch'
-        required: false
-        type: string
-        default: 'cyberlab-cley-security/3-deploy-webapp-demo'
+  repository_dispatch:
+    types:
+      - trigger-webapp-build  
 
 jobs:
   build-vuln-scan-and-push:
     runs-on: ubuntu-latest
 
     outputs:
-      image_latest: ${{ steps.image-info.outputs.FULL_IMAGE_LATEST }}
       image_build: ${{ steps.image-info.outputs.FULL_IMAGE_BUILD }}
       vuln_count: ${{ steps.grype_scan.outputs.HIGH_CRIT_COUNT }}
-    
+
+    env:
+      IMAGE_PATH: ${{ github.event.client_payload.ecr_url }}:${{ github.event.client_payload.image_tag }}
+      AWS_REGION: ${{ github.event.client_payload.aws_region }}
+      TARGET_REPO: ${{ github.event.client_payload.target_repository || 'cyberlab-cley-security/3-deploy-webapp-demo' }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -40,9 +25,8 @@ jobs:
       - name: Parse ECR URI
         id: parse_ecr
         run: |
-          ECR_URI="${{ github.event.inputs.ecr_repository_uri }}"
+          ECR_URI="${{ github.event.client_payload.ecr_url }}"
           
-          # Validation du format
           if [[ ! "$ECR_URI" =~ ^[0-9]+\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/.+ ]]; then
             echo "❌ Format ECR URI invalide: $ECR_URI"
             exit 1
@@ -61,7 +45,7 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ github.event.inputs.aws_region }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
@@ -71,7 +55,6 @@ jobs:
       - name: Ensure ECR repository exists
         run: |
           REPO_NAME=${{ steps.parse_ecr.outputs.ECR_REPOSITORY }}
-          AWS_REGION=${{ github.event.inputs.aws_region }}
           
           if ! aws ecr describe-repositories --repository-names $REPO_NAME --region $AWS_REGION >/dev/null 2>&1; then
             echo "📦 Repository does not exist. Creating..."
@@ -81,7 +64,6 @@ jobs:
             echo "✅ Repository already exists"
           fi
 
-      # ---------- BUILD OPTIMISÉ AVEC CACHE ----------
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -96,7 +78,6 @@ jobs:
           cache-to: type=gha,mode=max
           outputs: type=docker
 
-      # ---------- GRYPE SCAN (SOFT FAIL + ARTEFACT) ----------
       - name: Install Grype
         run: |
           echo "📥 Installing Grype..."
@@ -112,13 +93,6 @@ jobs:
           grype "$IMAGE" -o json > grype-report.json 2>&1 || true
           grype "$IMAGE" -o table > grype-report.txt 2>&1 || true
 
-          echo ""
-          echo "====== Grype Vulnerability Summary ======"
-          cat grype-report.json | jq -r '.matches[].vulnerability.severity' 2>/dev/null | sort | uniq -c || echo "No vulnerabilities found"
-          echo "=========================================="
-          echo ""
-
-          # Count vulnerabilities by severity
           CRITICAL_COUNT=$(cat grype-report.json | jq '[.matches[].vulnerability.severity | select(. == "Critical")] | length' 2>/dev/null || echo 0)
           HIGH_COUNT=$(cat grype-report.json | jq '[.matches[].vulnerability.severity | select(. == "High")] | length' 2>/dev/null || echo 0)
           MEDIUM_COUNT=$(cat grype-report.json | jq '[.matches[].vulnerability.severity | select(. == "Medium")] | length' 2>/dev/null || echo 0)
@@ -132,41 +106,19 @@ jobs:
           echo "LOW_COUNT=$LOW_COUNT" >> $GITHUB_OUTPUT
           echo "HIGH_CRIT_COUNT=$HIGH_CRIT_COUNT" >> $GITHUB_OUTPUT
 
-          # Display summary with emojis
-          echo ""
-          echo "📊 Vulnerability Breakdown:"
-          echo "   🔴 Critical: $CRITICAL_COUNT"
-          echo "   🟠 High: $HIGH_COUNT"
-          echo "   🟡 Medium: $MEDIUM_COUNT"
-          echo "   🟢 Low: $LOW_COUNT"
-          echo ""
-          
-          if [ "$HIGH_CRIT_COUNT" -gt 0 ]; then
-            echo "⚠️  WARNING: $HIGH_CRIT_COUNT High/Critical vulnerabilities found!"
-            echo "⚠️  Build will continue (soft fail mode enabled)"
-          else
-            echo "✅ No High/Critical vulnerabilities detected"
-          fi
-
-          # Soft fail - never block the pipeline
           exit 0
 
-      # ---------- TAG ET PUSH VERS ECR ----------
       - name: Tag and push to ECR
         run: |
           IMAGE_LOCAL="${{ steps.parse_ecr.outputs.ECR_REPOSITORY }}:scan"
-          IMAGE_LATEST="${{ github.event.inputs.ecr_repository_uri }}:${{ github.event.inputs.image_tag }}"
-          IMAGE_BUILD="${{ github.event.inputs.ecr_repository_uri }}:${{ github.run_number }}"
+          IMAGE_BUILD="${{ env.IMAGE_PATH }}-${GITHUB_RUN_NUMBER}"
           
-          echo "🏷️  Tagging images..."
-          docker tag "$IMAGE_LOCAL" "$IMAGE_LATEST"
           docker tag "$IMAGE_LOCAL" "$IMAGE_BUILD"
           
           echo "📤 Pushing to ECR..."
-          docker push "$IMAGE_LATEST"
           docker push "$IMAGE_BUILD"
           
-          echo "✅ Images pushed successfully"
+          echo "✅ Image pushed successfully"
 
       - name: Upload Grype reports
         if: always()
@@ -178,40 +130,13 @@ jobs:
             grype-report.txt
           retention-days: 30
 
-      - name: Comment vulnerability summary on commit
-        if: github.event_name == 'push' && always()
-        continue-on-error: true
-        run: |
-          SUMMARY="## 🔍 Security Scan Results
-          
-          **Image:** \`${{ github.event.inputs.ecr_repository_uri }}:${{ github.event.inputs.image_tag }}\`
-          
-          | Severity | Count |
-          |----------|-------|
-          | 🔴 Critical | ${{ steps.grype_scan.outputs.CRITICAL_COUNT }} |
-          | 🟠 High | ${{ steps.grype_scan.outputs.HIGH_COUNT }} |
-          | 🟡 Medium | ${{ steps.grype_scan.outputs.MEDIUM_COUNT }} |
-          | 🟢 Low | ${{ steps.grype_scan.outputs.LOW_COUNT }} |
-          
-          📄 Full report available in workflow artifacts"
-          
-          echo "$SUMMARY" >> $GITHUB_STEP_SUMMARY
-
       - name: Image pushed successfully
         id: image-info
         run: |
-          FULL_IMAGE_LATEST="${{ github.event.inputs.ecr_repository_uri }}:${{ github.event.inputs.image_tag }}"
-          FULL_IMAGE_BUILD="${{ github.event.inputs.ecr_repository_uri }}:${{ github.run_number }}"
-          
-          echo "FULL_IMAGE_LATEST=$FULL_IMAGE_LATEST" >> $GITHUB_OUTPUT
+          FULL_IMAGE_BUILD="${{ env.IMAGE_PATH }}-${GITHUB_RUN_NUMBER}"
           echo "FULL_IMAGE_BUILD=$FULL_IMAGE_BUILD" >> $GITHUB_OUTPUT
-          
-          echo ""
-          echo "✅ Docker images successfully built and pushed:"
-          echo "   📦 Latest: $FULL_IMAGE_LATEST"
-          echo "   📦 Build: $FULL_IMAGE_BUILD"
+          echo "✅ Docker image built and pushed: $FULL_IMAGE_BUILD"
 
-  # ---------- DISPATCH DEPLOYMENT ----------
   dispatch-deploy:
     name: Dispatch Deployment
     runs-on: ubuntu-latest
@@ -223,8 +148,8 @@ jobs:
 
       - name: Prepare and send deployment dispatch
         run: |
-          IMAGE_URI="${{ needs.build-vuln-scan-and-push.outputs.image_latest }}"
-          TARGET_REPO="${{ github.event.inputs.target_repository }}"
+          IMAGE_URI="${{ needs.build-vuln-scan-and-push.outputs.image_build }}"
+          TARGET_REPO="${{ env.TARGET_REPO }}"
           VULN_COUNT="${{ needs.build-vuln-scan-and-push.outputs.vuln_count }}"
 
           JSON_BODY=$(jq -n -c \
